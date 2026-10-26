@@ -2,6 +2,12 @@
 
 Restores copy, paste, cut and select-all inside CodeChef's code editor.
 
+## Known issue
+
+**Copy is not working properly. Paste is working.**
+
+![Copy issue example](copy-issue.png)
+
 ## Install
 
 1. Download the latest `codechef-clipboard-1.1.8.zip` from [Releases](https://github.com/swaroopstack/CodeChef-copy-paste/releases/latest).
