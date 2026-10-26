@@ -319,4 +319,76 @@
   function isElement(value) {
     return !!value && value.nodeType === 1;
   }
+
+  /* ------------------------------------------------------------------ *
+   * Editor detection / adapters
+   * ------------------------------------------------------------------ */
+
+  function isVisible(el) {
+    if (!isElement(el) || !el.isConnected) return false;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 60 || rect.height < 28) return false;
+    const style = getComputedStyle(el);
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+  }
+
+  function aceAdapter(container) {
+    const editor = container.env && container.env.editor;
+    if (!editor || typeof editor.getValue !== 'function' || typeof editor.insert !== 'function') {
+      return null;
+    }
+
+    // CodeChef turns Ace's text drag-and-drop off. With it off, dragging a
+    // selection shows the "not allowed" cursor and Ace cancels dragstart.
+    try {
+      if (typeof editor.getOption === 'function' && editor.getOption('dragEnabled') === false) {
+        editor.setOption('dragEnabled', true);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+
+    return {
+      kind: 'ace',
+      container,
+      manual: true,
+      getValue() {
+        return editor.getValue();
+      },
+      getSelectedText() {
+        return typeof editor.getSelectedText === 'function' ? editor.getSelectedText() : '';
+      },
+      focus() {
+        editor.focus();
+      },
+      selectAll() {
+        editor.focus();
+        editor.selectAll();
+      },
+      isReadOnly() {
+        try {
+          return typeof editor.getReadOnly === 'function' && editor.getReadOnly();
+        } catch (_) {
+          return false;
+        }
+      },
+      insert(text) {
+        if (this.isReadOnly()) throw new Error('read-only');
+        editor.focus();
+        // Same code path Ace itself uses for a normal paste. It replaces a
+        // non-empty selection and records an undo step.
+        editor.insert(text);
+        return 'ace';
+      },
+      deleteSelection() {
+        if (this.isReadOnly()) return;
+        const range = editor.getSelectionRange();
+        if (range && !range.isEmpty()) {
+          editor.session.remove(range);
+          editor.clearSelection();
+        }
+      }
+    };
+  }
+
 })();
