@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CodeChef workbench adapter fixture</title>
+  <style>
+    html, body { margin: 0; background: #0b1020; color: #d1d5db; font: 14px system-ui, sans-serif; }
+    h1 { font-size: 15px; padding: 12px 16px; margin: 0; background: #111827; }
+    p { margin: 16px; color: #94a3b8; }
+    #editor {
+      position: relative;
+      width: min(900px, calc(100vw - 32px));
+      height: 320px;
+      margin: 16px;
+      border: 1px solid #334155;
+      background: #111827;
+    }
+    #editor textarea {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      resize: none;
+      border: 0;
+      outline: 0;
+      padding: 10px;
+      background: transparent;
+      color: #e5e7eb;
+      font: 15px/1.5 monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>CodeChef workbench adapter fixture</h1>
+  <div id="editor" class="monaco-editor">
+    <textarea class="inputarea" aria-label="editor">AAA
+BBB
+CCC</textarea>
+  </div>
+  <p>This page exposes a workbench-shaped <code>window.workbench</code> service
+    collection. The extension should find the code editor service and insert
+    through <code>executeEdits</code>, never through a paste event or Monaco's
+    auto-indenting typing path.</p>
+
+  <script>
+    (() => {
+      const container = document.getElementById('editor');
+      const textarea = container.querySelector('textarea');
+      window.__workbenchEdits = [];
+      window.__pasteFired = false;
+
+      const value = () => textarea.value;
+
+      const offsetToPosition = (offset) => {
+        const before = value().slice(0, offset);
+        const lines = before.split('\n');
+        return {
+          lineNumber: lines.length,
+          column: lines[lines.length - 1].length + 1
+        };
+      };
+
+      const positionToOffset = (position) => {
+        const lines = value().split('\n');
+        const line = Math.max(1, Math.min(position.lineNumber, lines.length));
+        let offset = 0;
+        for (let i = 0; i < line - 1; i++) offset += lines[i].length + 1;
+        return offset + Math.max(1, position.column) - 1;
+      };
+
+      const rangeOffsets = (range) => {
+        const start = positionToOffset({
+          lineNumber: range.startLineNumber,
+          column: range.startColumn
+        });
+        const end = positionToOffset({
+          lineNumber: range.endLineNumber,
+          column: range.endColumn
+        });
+        return { start, end };
+      };
+
+      const model = {
+        getValue: value,
+        getFullModelRange() {
+          const lines = value().split('\n');
+          return {
+            startLineNumber: 1,
+            startColumn: 1,
+            endLineNumber: lines.length,
+            endColumn: lines[lines.length - 1].length + 1
+          };
+        },
+        getValueInRange(range) {
+          const { start, end } = rangeOffsets(range);
+          return value().slice(start, end);
+        },
+        getOffsetAt(position) {
+          return positionToOffset(position);
+        },
+        getPositionAt(offset) {
+          return offsetToPosition(offset);
+        }
+      };
+
+      const selection = () => {
+        const start = offsetToPosition(textarea.selectionStart);
+        const end = offsetToPosition(textarea.selectionEnd);
+        return {
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+          isEmpty: () => textarea.selectionStart === textarea.selectionEnd
+        };
+      };
+
+      const editor = {
+        getModel: () => model,
+        getValue: value,
+        getSelection: selection,
+        getPosition: () => offsetToPosition(textarea.selectionStart),
+        getDomNode: () => container,
+        getRawOptions: () => ({ readOnly: false }),
+        getOption: () => false,
+        focus() {
+          textarea.focus();
+        },
+        setSelection(range) {
+          const { start, end } = rangeOffsets(range);
+          textarea.setSelectionRange(start, end);
+        },
+        setPosition(position) {
+          const offset = positionToOffset(position);
+          textarea.setSelectionRange(offset, offset);
+        },
+        pushUndoStop() {},
+        popUndoStop() {},
+        revealPositionInCenterIfOutsideViewport() {},
+        executeEdits(source, edits) {
+          if (!edits || !edits.length) return false;
+          const edit = edits[0];
+          const { start, end } = rangeOffsets(edit.range);
+          const text = String(edit.text == null ? '' : edit.text);
+          textarea.value = value().slice(0, start) + text + value().slice(end);
+          const caret = start + text.length;
+          textarea.setSelectionRange(caret, caret);
+          window.__workbenchEdits.push({
+            source: String(source),
+            text,
+            range: edit.range
+          });
+          return true;
+        }
+      };
+
+      const service = {
+        getFocusedCodeEditor: () => editor,
+        getActiveCodeEditor: () => editor,
+        listCodeEditors: () => [editor]
+      };
+
+      // Mimic VS Code's ServiceCollection: a private _entries Map, get/has,
+      // and a SyncDescriptor that is instantiated on first get. This is the
+      // real shape the extension has to find, not just a bare Map.
+      class ServiceCollection {
+        constructor() {
+          this._entries = new Map();
+        }
+        set(id, instance) {
+          this._entries.set(id, instance);
+        }
+        has(id) {
+          return this._entries.has(id);
+        }
+        get(id) {
+          const entry = this._entries.get(id);
+          if (entry && typeof entry.ctor === 'function') {
+            const instance = entry.ctor();
+            this._entries.set(id, instance);
+            return instance;
+          }
+          return entry;
+        }
+      }
+
+      const collection = new ServiceCollection();
+      collection.set('editorService', { ctor: () => service });
+
+      // The extension looks for window.workbench.hc, finds its _entries Map,
+      // and resolves the descriptor if the service is not instantiated yet.
+      window.workbench = { hc: collection };
+
+      // If the extension falls back to the DOM paste path, this fires. The
+      // workbench adapter must not trigger it.
+      textarea.addEventListener('paste', () => {
+        window.__pasteFired = true;
+      });
+
+      textarea.focus();
+      container.dataset.ready = '1';
+    })();
+  </script>
+</body>
+</html>

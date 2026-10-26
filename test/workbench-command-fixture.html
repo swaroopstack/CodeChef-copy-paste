@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CodeChef workbench command fixture</title>
+  <style>
+    html, body { margin: 0; background: #0b1020; color: #d1d5db; font: 14px system-ui, sans-serif; }
+    h1 { font-size: 15px; padding: 12px 16px; margin: 0; background: #111827; }
+    p { margin: 16px; color: #94a3b8; }
+    #editor {
+      position: relative;
+      width: min(900px, calc(100vw - 32px));
+      height: 320px;
+      margin: 16px;
+      border: 1px solid #334155;
+      background: #111827;
+    }
+    #editor textarea {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      resize: none;
+      border: 0;
+      outline: 0;
+      padding: 10px;
+      background: transparent;
+      color: #e5e7eb;
+      font: 15px/1.5 monospace;
+    }
+  </style>
+</head>
+<body>
+  <h1>CodeChef workbench command fixture</h1>
+  <div id="editor" class="monaco-editor">
+    <textarea class="inputarea" aria-label="editor">START</textarea>
+  </div>
+  <p>This page exposes the live workbench embedder shape:
+    <code>window.workbench = { commands: { executeCommand } }</code>, with no
+    DI service collection. The extension must use the workbench
+    <code>paste</code> command, never a synthetic or native paste event.</p>
+
+  <script>
+    (() => {
+      const container = document.getElementById('editor');
+      const textarea = container.querySelector('textarea');
+      window.__workbenchCommands = [];
+      window.__pasteFired = false;
+      window.__copied = '';
+
+      textarea.focus();
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+
+      window.workbench = {
+        commands: {
+          executeCommand(id, args) {
+            window.__workbenchCommands.push({ id, args });
+
+            if (id === 'editor.action.selectAll') {
+              textarea.focus();
+              textarea.select();
+              return Promise.resolve();
+            }
+
+            if (id === 'editor.action.clipboardCopyAction') {
+              textarea.focus();
+              return Promise.resolve(document.execCommand('copy'));
+            }
+
+            if (id !== 'paste') return Promise.resolve();
+
+            const text = String(args && args.text ? args.text : '');
+            const start = textarea.selectionStart;
+            const end = textarea.selectionEnd;
+            textarea.value = textarea.value.slice(0, start) + text + textarea.value.slice(end);
+            const caret = start + text.length;
+            textarea.setSelectionRange(caret, caret);
+            return Promise.resolve();
+          }
+        }
+      };
+
+      // Record what the editor's model copy path would write. The extension
+      // must use these workbench commands instead of a DOM selection copy.
+      textarea.addEventListener('copy', () => {
+        window.__copied = textarea.value.slice(textarea.selectionStart, textarea.selectionEnd);
+      });
+
+      // The command adapter must not fall back to a DOM paste event.
+      textarea.addEventListener('paste', () => {
+        window.__pasteFired = true;
+      });
+
+      container.dataset.ready = '1';
+    })();
+  </script>
+</body>
+</html>
