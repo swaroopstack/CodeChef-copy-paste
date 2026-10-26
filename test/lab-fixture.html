@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>CodeChef lab lockdown fixture (VS Code-style editor)</title>
+  <style>
+    html, body { margin: 0; background: #0b1020; color: #d1d5db; font: 14px system-ui, sans-serif; }
+    h1 { font-size: 15px; padding: 12px 16px; margin: 0; background: #111827; }
+    p { margin: 16px; color: #94a3b8; }
+    #editor {
+      position: relative;
+      width: min(900px, calc(100vw - 32px));
+      height: 320px;
+      margin: 16px;
+      border: 1px solid #334155;
+      background: #111827;
+    }
+    #editor textarea {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      box-sizing: border-box;
+      resize: none;
+      border: 0;
+      outline: 0;
+      padding: 10px;
+      background: transparent;
+      color: #e5e7eb;
+      font: 15px/1.5 monospace;
+    }
+    #editor.read-only { opacity: 0.7; }
+  </style>
+</head>
+<body>
+  <h1>CodeChef lab lockdown fixture (VS Code-style editor)</h1>
+  <div id="editor"></div>
+  <p>This page applies the lab lockdown before the editor exists, then mounts a
+    Monaco-like editor after a delay. It reproduces the assessment lab, where
+    the extension has to repair the page APIs before the editor registers its
+    handlers.</p>
+
+  <script>
+    // ---------------------------------------------------------------------
+    // The same lockdown as fixture.html. It runs before the editor exists,
+    // exactly like CodeChef's LabEditor does with the VS Code workbench.
+    // ---------------------------------------------------------------------
+    const blockedEvents = [
+      'copy', 'cut', 'paste', 'beforecopy', 'beforecut', 'beforepaste',
+      'contextmenu', 'selectstart', 'select', 'dragstart', 'drag', 'dragenter',
+      'dragover', 'dragleave', 'drop', 'dragend'
+    ];
+
+    const swallow = (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      return false;
+    };
+
+    const originalAddEventListener = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+      if (blockedEvents.includes(String(type).toLowerCase())) return;
+      return originalAddEventListener.call(this, type, listener, options);
+    };
+    window.__lockdownAdd = EventTarget.prototype.addEventListener;
+
+    try {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: false,
+        value: {
+          readText: () => Promise.reject(new Error('Clipboard access denied')),
+          writeText: () => Promise.reject(new Error('Clipboard access denied')),
+          read: () => Promise.reject(new Error('Clipboard access denied')),
+          write: () => Promise.reject(new Error('Clipboard access denied'))
+        }
+      });
+    } catch (_) {
+      /* ignore */
+    }
+
+    const originalExecCommand = document.execCommand.bind(document);
+    document.execCommand = function (command) {
+      if (['copy', 'cut', 'paste', 'selectall'].includes(String(command).toLowerCase())) return false;
+      return originalExecCommand.apply(document, arguments);
+    };
+    window.__lockdownExec = document.execCommand;
+    window.__lockdownApplied = true;
+
+    const shortcutBlocker = (event) => {
+      const key = String(event.key || '').toLowerCase();
+      const modifier = event.ctrlKey || event.metaKey;
+      const blocked =
+        (modifier && ['c', 'x', 'v', 'a', 's', 'p'].includes(key)) ||
+        key === 'f12' ||
+        (modifier && event.shiftKey && ['i', 'j', 'c'].includes(key)) ||
+        (modifier && key === 'u') ||
+        key === 'printscreen';
+      return blocked ? swallow(event) : true;
+    };
+
+    document.addEventListener('keydown', shortcutBlocker, true);
+    document.addEventListener('keyup', shortcutBlocker, true);
+    document.addEventListener('keypress', shortcutBlocker, true);
+
+    // Mount the editor. The default delay reproduces the real lab, where the
+    // workbench loads after a network round trip. ?immediate=1 mounts it in the
+    // same task as the lockdown, which is the worst-case race: the editor's
+    // clipboard handlers must still register even before the repair poll runs.
+    const mountEditor = () => {
+      const container = document.getElementById('editor');
+      container.className = 'monaco-editor';
+
+      const textarea = document.createElement('textarea');
+      textarea.className = 'inputarea';
+      textarea.setAttribute('aria-label', 'editor');
+      textarea.value = 'AAA\nBBB\nCCC';
+      container.appendChild(textarea);
+
+      window.__keys = [];
+      window.__dragEvents = [];
+      window.__copied = '';
+      window.__pasted = '';
+      window.__pasteCount = 0;
+
+      textarea.addEventListener('keydown', (event) => {
+        if (!(event.ctrlKey || event.metaKey)) return;
+        const key = String(event.key || '').toLowerCase();
+        if (['control', 'shift', 'alt', 'meta'].includes(key)) return;
+        window.__keys.push(key);
+        if (key === 'a') {
+          // Simulate Monaco selecting the whole model.
+          textarea.select();
+          if (!container.querySelector('.selected-text')) {
+            const marker = document.createElement('span');
+            marker.className = 'selected-text';
+            marker.textContent = textarea.value;
+            marker.style.display = 'none';
+            container.appendChild(marker);
+          }
+        }
+      });
+
+      // Monaco's real copy listener writes the editor selection into
+      // clipboardData when execCommand('copy') fires a copy event.
+      textarea.addEventListener('copy', (event) => {
+        window.__copied = textarea.value;
+        event.clipboardData.setData('text/plain', textarea.value);
+        event.preventDefault();
+      });
+
+      // Monaco's real paste listener reads the native paste event's
+      // clipboardData. This is the path a real Ctrl+V uses.
+      const ignoreSynthetic = new URLSearchParams(location.search).has('ignore-synthetic');
+      textarea.addEventListener('paste', (event) => {
+        // Some workbench builds ignore synthetic (untrusted) paste events.
+        // The extension must then use the browser's real paste command.
+        if (ignoreSynthetic && !event.isTrusted) return;
+        const text = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
+        if (!text) return;
+        event.preventDefault();
+        window.__pasted = text;
+        window.__pasteCount += 1;
+        textarea.setRangeText(text, textarea.selectionStart, textarea.selectionEnd, 'end');
+      });
+
+      container.addEventListener('dragstart', (event) => {
+        window.__dragEvents.push('dragstart');
+        event.preventDefault();
+      });
+
+      textarea.focus();
+      container.dataset.ready = '1';
+    };
+
+    if (new URLSearchParams(location.search).has('immediate')) {
+      mountEditor();
+    } else {
+      setTimeout(mountEditor, 700);
+    }
+  </script>
+</body>
+</html>
