@@ -505,6 +505,504 @@
       }
     };
   }
+  // VS Code's web workbench (used by CodeChef's assessment lab) embeds Monaco
+  // but does not expose window.monaco. It does expose the workbench instance
+  // as window.workbench, and that instance holds the DI service collection.
+  // Find the code editor service in it and insert through executeEdits. That
+  // is a direct model edit: it bypasses Monaco's typing path (which auto-
+  // indents after `{`), the paste path's indentation normalization, and any
+  // workbench paste listener that might rewrite the block.
+  let workbenchServiceCache = null;
+  let workbenchMissUntil = 0;
+
+  function isCodeEditorService(value) {
+    return !!(
+      value &&
+      (typeof value.getFocusedCodeEditor === 'function' ||
+        typeof value.getActiveCodeEditor === 'function' ||
+        typeof value.listCodeEditors === 'function')
+    );
+  }
+
+  function collectServiceMaps(root) {
+    const maps = [];
+    const seen = new Set();
+
+    const visit = (obj, depth) => {
+      if (!obj || depth > 1 || seen.has(obj)) return;
+      if (typeof obj !== 'object' && typeof obj !== 'function') return;
+      seen.add(obj);
+
+      if (obj instanceof Map) {
+        maps.push(obj);
+        return;
+      }
+
+      let names;
+      try {
+        names = Object.getOwnPropertyNames(obj);
+      } catch (_) {
+        return;
+      }
+
+      for (const name of names) {
+        if (
+          name === 'window' ||
+          name === 'document' ||
+          name === 'parent' ||
+          name === 'top' ||
+          name === 'self' ||
+          name === 'ownerDocument' ||
+          name === 'location' ||
+          name === 'constructor' ||
+          name === 'prototype'
+        ) {
+          continue;
+        }
+        let value;
+        try {
+          value = obj[name];
+        } catch (_) {
+          continue;
+        }
+        if (!value || (typeof value !== 'object' && typeof value !== 'function')) continue;
+        if (typeof Node !== 'undefined' && value instanceof Node) continue;
+        if (value instanceof Map) {
+          maps.push(value);
+          continue;
+        }
+        if (depth < 1) visit(value, depth + 1);
+      }
+    };
+
+    visit(root, 0);
+    return maps;
+  }
+
+  function findServiceInObject(root, maxDepth) {
+    const seen = new Set();
+    const queue = [{ value: root, depth: 0 }];
+    const skip = new Set([
+      'window',
+      'document',
+      'parent',
+      'top',
+      'self',
+      'ownerDocument',
+      'location',
+      'constructor',
+      'prototype'
+    ]);
+
+    while (queue.length && seen.size < 800) {
+      const item = queue.shift();
+      const value = item.value;
+      const depth = item.depth;
+      if (!value || (typeof value !== 'object' && typeof value !== 'function')) continue;
+      if (seen.has(value)) continue;
+      seen.add(value);
+
+      if (isCodeEditorService(value)) return value;
+      if (typeof value === 'function') continue;
+      if (typeof Node !== 'undefined' && value instanceof Node) continue;
+
+      if (value instanceof Map || value instanceof Set) {
+        try {
+          for (const entry of value.values()) {
+            queue.push({ value: entry, depth: depth + 1 });
+          }
+        } catch (_) {
+          /* ignore */
+        }
+        continue;
+      }
+
+      if (depth >= maxDepth) continue;
+
+      let names;
+      try {
+        names = Object.getOwnPropertyNames(value);
+      } catch (_) {
+        continue;
+      }
+      for (const name of names) {
+        if (skip.has(name)) continue;
+        let child;
+        try {
+          child = value[name];
+        } catch (_) {
+          continue;
+        }
+        if (!child || (typeof child !== 'object' && typeof child !== 'function')) continue;
+        queue.push({ value: child, depth: depth + 1 });
+      }
+    }
+    return null;
+  }
+
+  function findWorkbenchEditorService() {
+    const workbench = window.workbench;
+    if (!workbench) return null;
+    if (workbenchServiceCache && workbenchServiceCache.workbench === workbench) {
+      return workbenchServiceCache.service;
+    }
+    if (workbenchMissUntil && Date.now() < workbenchMissUntil) return null;
+
+    const roots = [];
+    for (const key of ['hc', 'serviceCollection', 'services', 'container', 'di']) {
+      let value;
+      try {
+        value = workbench[key];
+      } catch (_) {
+        value = null;
+      }
+      if (value) roots.push(value);
+    }
+    roots.push(workbench);
+
+    let service = null;
+    for (const root of roots) {
+      if (isCodeEditorService(root)) {
+        service = root;
+        break;
+      }
+
+      const maps = collectServiceMaps(root);
+      for (const map of maps) {
+        try {
+          for (const value of map.values()) {
+            if (isCodeEditorService(value)) {
+              service = value;
+              break;
+            }
+          }
+        } catch (_) {
+          /* ignore */
+        }
+        if (service) break;
+      }
+      if (service) break;
+
+      // Some collections keep SyncDescriptors in the map. Resolve the tokens
+      // so a not-yet-instantiated service can still be found.
+      if (typeof root.get === 'function') {
+        for (const map of maps) {
+          let keys;
+          try {
+            keys = Array.from(map.keys());
+          } catch (_) {
+            keys = [];
+          }
+          for (const key of keys) {
+            let value;
+            try {
+              value = root.get(key);
+            } catch (_) {
+              continue;
+            }
+            if (isCodeEditorService(value)) {
+              service = value;
+              break;
+            }
+          }
+          if (service) break;
+        }
+      }
+      if (service) break;
+    }
+
+    // Last resort for a workbench build whose service collection is not a
+    // plain Map under one of the names above. This is a bounded graph walk,
+    // not a general object crawl.
+    if (!service) {
+      service = findServiceInObject(workbench, 3);
+    }
+
+    // Only cache a hit. The workbench may still be starting up when the first
+    // adapter is created; a cached miss would permanently pin the extension to
+    // the DOM fallback. Retry a miss after a short delay instead of walking the
+    // workbench graph on every toolbar refresh.
+    if (service) {
+      workbenchServiceCache = { workbench, service };
+      workbenchMissUntil = 0;
+    } else {
+      workbenchServiceCache = null;
+      workbenchMissUntil = Date.now() + 2000;
+    }
+    return service;
+  }
+
+  function workbenchEditorFor(container, service) {
+    if (!service) return null;
+
+    const candidates = [];
+    const add = (editor) => {
+      if (editor && candidates.indexOf(editor) === -1) candidates.push(editor);
+    };
+
+    try {
+      if (typeof service.getFocusedCodeEditor === 'function') {
+        add(service.getFocusedCodeEditor());
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      if (typeof service.getActiveCodeEditor === 'function') {
+        add(service.getActiveCodeEditor());
+      }
+    } catch (_) {
+      /* ignore */
+    }
+    try {
+      if (typeof service.listCodeEditors === 'function') {
+        for (const editor of service.listCodeEditors()) add(editor);
+      }
+    } catch (_) {
+      /* ignore */
+    }
+
+    for (let editor of candidates) {
+      if (typeof editor.getModifiedEditor === 'function') {
+        try {
+          editor = editor.getModifiedEditor() || editor;
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      if (!editor || typeof editor.getModel !== 'function' || typeof editor.executeEdits !== 'function') {
+        continue;
+      }
+      let dom = null;
+      try {
+        dom = editor.getDomNode && editor.getDomNode();
+      } catch (_) {
+        dom = null;
+      }
+      if (dom && (dom === container || container.contains(dom) || dom.contains(container))) {
+        return editor;
+      }
+    }
+    return null;
+  }
+
+  function workbenchAdapter(container) {
+    const service = findWorkbenchEditorService();
+    const editor = workbenchEditorFor(container, service);
+    if (!editor) return null;
+
+    const model = () => {
+      try {
+        return editor.getModel();
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const selection = () => {
+      try {
+        return editor.getSelection();
+      } catch (_) {
+        return null;
+      }
+    };
+
+    const isEmptyRange = (range) => {
+      if (!range) return true;
+      if (typeof range.isEmpty === 'function') return range.isEmpty();
+      return (
+        range.startLineNumber === range.endLineNumber &&
+        range.startColumn === range.endColumn
+      );
+    };
+
+    const insertRange = () => {
+      const selected = selection();
+      if (selected) return selected;
+
+      let position = null;
+      try {
+        position = editor.getPosition && editor.getPosition();
+      } catch (_) {
+        position = null;
+      }
+      if (position) {
+        return {
+          startLineNumber: position.lineNumber,
+          startColumn: position.column,
+          endLineNumber: position.lineNumber,
+          endColumn: position.column
+        };
+      }
+
+      // Never replace the whole file just because the cursor could not be
+      // read. Insert at the very start instead; the caller can still ask for
+      // Ctrl+V if this is not the right place.
+      const textModel = model();
+      if (!textModel) return null;
+      const full = textModel.getFullModelRange();
+      return {
+        startLineNumber: full.startLineNumber,
+        startColumn: full.startColumn,
+        endLineNumber: full.startLineNumber,
+        endColumn: full.startColumn
+      };
+    };
+
+    return {
+      kind: 'monaco-workbench',
+      container,
+      manual: true,
+      getValue() {
+        try {
+          return editor.getValue() || '';
+        } catch (_) {
+          return '';
+        }
+      },
+      getSelectedText() {
+        const selected = selection();
+        const textModel = model();
+        if (!selected || !textModel || isEmptyRange(selected)) return '';
+        try {
+          return textModel.getValueInRange(selected) || '';
+        } catch (_) {
+          return '';
+        }
+      },
+      focus() {
+        try {
+          editor.focus();
+        } catch (_) {
+          /* ignore */
+        }
+      },
+      selectAll() {
+        const textModel = model();
+        if (!textModel) return;
+        try {
+          editor.setSelection(textModel.getFullModelRange());
+          editor.focus();
+        } catch (_) {
+          /* ignore */
+        }
+      },
+      isReadOnly() {
+        try {
+          const raw = editor.getRawOptions && editor.getRawOptions();
+          if (raw && typeof raw.readOnly === 'boolean') return raw.readOnly;
+          // EditorOption.readOnly is 94 in this Monaco build.
+          if (typeof editor.getOption === 'function' && editor.getOption(94)) return true;
+        } catch (_) {
+          /* ignore */
+        }
+        return false;
+      },
+      paste(text) {
+        if (!text || this.isReadOnly()) return '';
+        const range = insertRange();
+        if (!range) return '';
+
+        const textModel = model();
+        let originalText = '';
+        if (textModel) {
+          try {
+            originalText = textModel.getValueInRange(range) || '';
+          } catch (_) {
+            originalText = '';
+          }
+        }
+
+        try {
+          if (typeof editor.pushUndoStop === 'function') editor.pushUndoStop();
+          const applied = editor.executeEdits('codechef-clipboard', [
+            { range, text, forceMoveMarkers: true }
+          ]);
+          if (typeof editor.popUndoStop === 'function') editor.popUndoStop();
+          if (applied === false) return '';
+
+          // executeEdits is a direct model edit and should be verbatim. Verify
+          // that this workbench build did not transform the text. If it did,
+          // restore the original selection instead of leaving a corrupted
+          // brace block behind.
+          if (textModel) {
+            let startOffset = null;
+            try {
+              startOffset = textModel.getOffsetAt({
+                lineNumber: range.startLineNumber,
+                column: range.startColumn
+              });
+            } catch (_) {
+              startOffset = null;
+            }
+            if (startOffset !== null) {
+              try {
+                const startPosition = textModel.getPositionAt(startOffset);
+                const endPosition = textModel.getPositionAt(startOffset + text.length);
+                const insertedRange = {
+                  startLineNumber: startPosition.lineNumber,
+                  startColumn: startPosition.column,
+                  endLineNumber: endPosition.lineNumber,
+                  endColumn: endPosition.column
+                };
+                if (textModel.getValueInRange(insertedRange) !== text) {
+                  editor.executeEdits('codechef-clipboard-verify', [
+                    { range: insertedRange, text: originalText, forceMoveMarkers: true }
+                  ]);
+                  try {
+                    editor.setSelection(range);
+                    editor.focus();
+                  } catch (_) {
+                    /* ignore */
+                  }
+                  return '';
+                }
+              } catch (_) {
+                /* verification is best-effort */
+              }
+            }
+          }
+
+          // Put the cursor after the inserted block. This is cosmetic; the
+          // inserted text itself has already been verified.
+          try {
+            if (textModel) {
+              const start = textModel.getOffsetAt({
+                lineNumber: range.startLineNumber,
+                column: range.startColumn
+              });
+              const end = textModel.getPositionAt(start + text.length);
+              editor.setPosition(end);
+              if (typeof editor.revealPositionInCenterIfOutsideViewport === 'function') {
+                editor.revealPositionInCenterIfOutsideViewport(end);
+              }
+            }
+          } catch (_) {
+            /* ignore */
+          }
+
+          editor.focus();
+          return 'workbench';
+        } catch (_) {
+          return '';
+        }
+      },
+      insert(text) {
+        return this.paste(text);
+      },
+      deleteSelection() {
+        const selected = selection();
+        if (!selected || isEmptyRange(selected)) return;
+        try {
+          editor.executeEdits('codechef-clipboard', [
+            { range: selected, text: '', forceMoveMarkers: true }
+          ]);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    };
+  }
   // DOM fallback for workbench builds where the service collection cannot be
   // reached. It focuses the hidden textarea, uses Monaco's select-all
   // keybinding, and fires the restored copy / insertText commands. Its
