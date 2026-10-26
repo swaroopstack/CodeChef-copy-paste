@@ -1667,4 +1667,484 @@
       error: data.error
     });
   });
+  /* ------------------------------------------------------------------ *
+   * Copy / cut / paste
+   * ------------------------------------------------------------------ */
+
+  function toastCopyResult(result) {
+    if (result && typeof result.then === 'function') {
+      result.then(toastCopyResult, () => toast('Could not copy'));
+      return;
+    }
+    const path = lastCopyPath ? ' \u00b7 ' + lastCopyPath : '';
+    if (result === 'whole' || result === true) toast('Copied the whole file' + path);
+    else if (result === 'selection' || result === false) toast('Copied' + path);
+    else toast('Could not copy');
+  }
+
+  function copyAll(adapter, options) {
+    const opts = options || {};
+    lastCopyFolds = 0;
+    lastUnfoldPath = '';
+    adapter = chooseAdapter(adapter);
+    if (!adapter) {
+      toast('No code editor found');
+      return;
+    }
+
+    if (typeof adapter.copyAll === 'function' || typeof adapter.copy === 'function') {
+      try {
+        const copy = adapter.copyAll || adapter.copy;
+        toastCopyResult(copy.call(adapter));
+      } catch (_) {
+        toast('Could not copy');
+      }
+      if (!opts.keepFocus && !adapter.copyKeepsFocus) {
+        try {
+          adapter.focus();
+        } catch (_) {
+          /* ignore */
+        }
+      }
+      return;
+    }
+
+    const text = editorValue(adapter);
+    if (!text) {
+      toast('The editor is empty');
+      return;
+    }
+
+    lastCopyPath = 'bridge';
+    bridgeWrite(text).then((ok) => {
+      if (ok) {
+        toast('Copied the whole file \u00b7 ' + textLength(text) + ' \u00b7 bridge');
+      } else {
+        toast('Could not write to the clipboard');
+      }
+    });
+
+    if (!opts.keepFocus) {
+      try {
+        adapter.focus();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  }
+
+  function copySmart(adapter) {
+    adapter = chooseAdapter(adapter);
+    if (!adapter) {
+      toast('No code editor found');
+      return;
+    }
+
+    if (typeof adapter.copy === 'function') {
+      try {
+        toastCopyResult(adapter.copy());
+      } catch (_) {
+        toast('Could not copy');
+      }
+      try {
+        if (!adapter.copyKeepsFocus) adapter.focus();
+      } catch (_) {
+        /* ignore */
+      }
+      return;
+    }
+
+    const selected = selectedText(adapter);
+    if (!selected) {
+      copyAll(adapter);
+      return;
+    }
+
+    lastCopyPath = 'bridge';
+    bridgeWrite(selected).then((ok) => {
+      toast(
+        ok
+          ? 'Copied \u00b7 ' + textLength(selected) + ' \u00b7 bridge'
+          : 'Could not write to the clipboard'
+      );
+    });
+
+    try {
+      adapter.focus();
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function pasteFromClipboard(adapter) {
+    adapter = chooseAdapter(adapter);
+    if (!adapter) {
+      toast('No code editor found');
+      return;
+    }
+
+    if (adapter.isReadOnly()) {
+      toast('This editor is read-only');
+      return;
+    }
+
+    // VS Code/Monaco without window.monaco: read the real clipboard from the
+    // isolated world and insert it through Monaco's paste path. If that fails,
+    // the adapter asks the isolated world for the browser's native paste
+    // command before falling back to insertText.
+    if (typeof adapter.paste === 'function') {
+      setTimeout(() => {
+        requestBridge('read').then((reply) => {
+          const text =
+            reply.ok && typeof reply.text === 'string' ? reply.text.replace(/\r\n?/g, '\n') : '';
+
+          let result;
+          try {
+            result = adapter.paste(text);
+          } catch (_) {
+            result = '';
+          }
+
+          Promise.resolve(result).then((ok) => {
+            if (ok && text) {
+              lastPastePath = ok;
+              if (ok === 'insertText') {
+                toast('Pasted (fallback \u2014 may re-indent) \u00b7 ' + textLength(text), 3200);
+              } else {
+                toast('Pasted \u00b7 ' + textLength(text) + ' \u00b7 ' + ok);
+              }
+            } else if (!reply.ok) {
+              toast('Press Ctrl+V to paste', 2800);
+            } else if (!text) {
+              toast('The clipboard is empty');
+            } else {
+              toast('Press Ctrl+V to paste', 2800);
+            }
+          });
+        });
+      }, 50);
+      return;
+    }
+
+    if (!adapter.manual) {
+      try {
+        adapter.focus();
+      } catch (_) {
+        /* ignore */
+      }
+      toast('Press Ctrl+V to paste');
+      return;
+    }
+
+    // Give the isolated-world helper a tick to observe the real gesture and
+    // arm its one-shot clipboard-read window.
+    setTimeout(() => {
+      requestBridge('read').then((reply) => {
+        if (!reply.ok || typeof reply.text !== 'string') {
+          try {
+            adapter.focus();
+          } catch (_) {
+            /* ignore */
+          }
+          toast('Clipboard access was blocked \u2014 press Ctrl+V now', 2800);
+          return;
+        }
+
+        if (!reply.text) {
+          toast('The clipboard is empty');
+          return;
+        }
+
+        const text = reply.text.replace(/\r\n?/g, '\n');
+
+        try {
+          const result = adapter.insert(text);
+          const path = typeof result === 'string' && result ? result : 'insert';
+          lastPastePath = path;
+          toast('Pasted \u00b7 ' + textLength(text) + ' \u00b7 ' + path);
+        } catch (error) {
+          toast(adapter.isReadOnly() ? 'This editor is read-only' : 'Could not paste here');
+        }
+      });
+    }, 50);
+  }
+
+  function showDiagnostic() {
+    const adapter =
+      lastAdapter && lastAdapter.container && lastAdapter.container.isConnected
+        ? chooseAdapter(lastAdapter)
+        : findVisibleAdapter();
+    const workbench = window.workbench;
+    const commands = !!(
+      workbench &&
+      workbench.commands &&
+      typeof workbench.commands.executeCommand === 'function'
+    );
+
+    if (!adapter) {
+      toast(
+        'v' +
+          VERSION +
+          ' \u00b7 no editor' +
+          ' \u00b7 workbench: ' +
+          (workbench ? 'yes' : 'no') +
+          ' \u00b7 commands: ' +
+          (commands ? 'yes' : 'no'),
+        5200
+      );
+      return;
+    }
+
+    const extra = adapter.textareaCount > 1 ? ' \u00b7 ' + adapter.textareaCount + ' textareas' : '';
+    toast(
+      'v' +
+        VERSION +
+        ' \u00b7 ' +
+        adapter.kind +
+        extra +
+        ' \u00b7 workbench: ' +
+        (workbench ? 'yes' : 'no') +
+        ' \u00b7 commands: ' +
+        (commands ? 'yes' : 'no') +
+        ' \u00b7 paste: ' +
+        (lastPastePath || 'none') +
+        ' \u00b7 copy: ' +
+        (lastCopyPath || 'none') +
+        (lastCopyFolds
+          ? ' \u00b7 folds: ' +
+            lastCopyFolds +
+            ' \u00b7 unfold: ' +
+            (lastUnfoldPath || 'none')
+          : ''),
+      5200
+    );
+  }
+
+  function onKeyDown(event) {
+    if (syntheticEvents.has(event)) return;
+
+    const modifier = event.ctrlKey || event.metaKey;
+    const key = typeof event.key === 'string' ? event.key.toLowerCase() : '';
+    const code = event.code || '';
+
+    // Ctrl+Alt+D is an alternate diagnostic shortcut. Alt+Shift+D can be
+    // swallowed by Windows' keyboard-layout switch, so the toolbar version
+    // label is clickable too.
+    if (modifier && event.altKey && !event.shiftKey && (key === 'd' || code === 'KeyD')) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      showDiagnostic();
+      return;
+    }
+
+    if (modifier && !event.altKey) {
+      const action =
+        key === 'c' || code === 'KeyC'
+          ? 'c'
+          : key === 'v' || code === 'KeyV'
+            ? 'v'
+            : key === 'x' || code === 'KeyX'
+              ? 'x'
+              : key === 'a' || code === 'KeyA'
+                ? 'a'
+                : '';
+
+      if (action) {
+        const adapter = resolveAdapter(event);
+        if (!adapter) return;
+
+        // The VS Code editor handles its own shortcuts. Its key blockers were
+        // released when the adapter was detected, so let the event through.
+        // For the live workbench command adapter, take over every Ctrl+C:
+        // the native workbench copy can still fall back to the rendered DOM
+        // when a region is folded. The command path selects the model, unfolds
+        // folded regions, and copies from the model selection.
+        if (adapter.kind === 'monaco-workbench-command') {
+          if (action === 'c') {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            try {
+              toastCopyResult(adapter.copy());
+            } catch (_) {
+              toast('Could not copy');
+            }
+          }
+          return;
+        }
+
+        // The DOM-only adapter keeps its old behavior: only Ctrl+C with
+        // nothing selected is turned into "select all and copy". With a
+        // selection, the editor's native copy handler is reliable there.
+        if (adapter.kind === 'monaco-dom') {
+          if (action === 'c' && typeof adapter.hasSelection === 'function' && !adapter.hasSelection()) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            lastCopyFolds = 0;
+            lastUnfoldPath = '';
+            try {
+              toastCopyResult(adapter.copy());
+            } catch (_) {
+              toast('Could not copy');
+            }
+          }
+          return;
+        }
+
+        // Stop CodeChef's document-level capture blocker, but do not prevent
+        // the default action: the browser still fires copy/cut/paste, which
+        // our window-level handlers below handle.
+        event.stopImmediatePropagation();
+
+        if (action === 'a') {
+          event.preventDefault();
+          try {
+            adapter.selectAll();
+          } catch (_) {
+            /* ignore */
+          }
+          return;
+        }
+
+        if (action === 'c' && !selectedText(adapter)) {
+          // Ctrl+C with no selection is the common "give me my whole file"
+          // case. Handle it now instead of relying on a copy event.
+          event.preventDefault();
+          copyAll(adapter);
+          return;
+        }
+
+        // For copy/cut/paste with a selection, let the native clipboard event
+        // fire. The handlers below replace the editor-specific bits.
+        return;
+      }
+    }
+
+    if (event.altKey && event.shiftKey && !modifier) {
+      if (code !== 'KeyC' && code !== 'KeyV' && code !== 'KeyD') return;
+
+      const adapter = resolveAdapter(event) || findVisibleAdapter();
+      if (!adapter) return;
+
+      event.preventDefault();
+      if (code === 'KeyD') {
+        showDiagnostic();
+        return;
+      }
+      // Do not stop propagation here: the isolated-world helper needs to see
+      // this trusted keydown to arm its one-shot clipboard read.
+      if (code === 'KeyC') copyAll(adapter);
+      else pasteFromClipboard(adapter);
+    }
+  }
+
+  function onCopy(event) {
+    const adapter = resolveAdapter(event);
+    if (!adapter || !adapter.manual) return;
+
+    const selected = selectedText(adapter);
+    const text = selected || editorValue(adapter);
+    if (!text) return;
+
+    try {
+      if (!event.clipboardData) return;
+      event.clipboardData.setData('text/plain', text);
+    } catch (_) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    toast(selected ? 'Copied \u00b7 ' + textLength(text) : 'Copied the whole file \u00b7 ' + textLength(text));
+  }
+
+  function onCut(event) {
+    const adapter = resolveAdapter(event);
+    if (!adapter || !adapter.manual) return;
+
+    const text = selectedText(adapter);
+    if (!text) return;
+
+    try {
+      if (!event.clipboardData) return;
+      event.clipboardData.setData('text/plain', text);
+    } catch (_) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    if (adapter.isReadOnly()) {
+      toast('This editor is read-only');
+      return;
+    }
+
+    try {
+      adapter.deleteSelection();
+      toast('Cut \u00b7 ' + textLength(text));
+    } catch (_) {
+      toast('This editor is read-only');
+    }
+  }
+
+  function finishPaste(adapter, text, result) {
+    if (result === '') {
+      toast(
+        adapter.isReadOnly() ? 'This editor is read-only' : 'Press Ctrl+V to paste',
+        2800
+      );
+      return;
+    }
+    // Adapters that use a direct model edit or a workbench command return
+    // their path name; the others return undefined and are using the
+    // browser's paste event.
+    lastPastePath = typeof result === 'string' && result ? result : 'native';
+    toast('Pasted \u00b7 ' + textLength(text) + ' \u00b7 ' + lastPastePath);
+  }
+
+  function onPaste(event) {
+    const adapter = resolveAdapter(event);
+    if (!adapter) return;
+    if (!adapter.manual) {
+      // The VS Code editor handles its own paste. Record that it went through
+      // the native path so the diagnostic can report it.
+      lastPastePath = 'native';
+      return;
+    }
+
+    const raw = event.clipboardData ? event.clipboardData.getData('text/plain') : '';
+    const text = raw.replace(/\r\n?/g, '\n');
+    event.preventDefault();
+    event.stopImmediatePropagation();
+
+    if (!text) {
+      toast('The clipboard is empty');
+      return;
+    }
+
+    try {
+      const result = adapter.insert(text);
+      if (result && typeof result.then === 'function') {
+        result.then(
+          (ok) => finishPaste(adapter, text, ok),
+          () => toast(adapter.isReadOnly() ? 'This editor is read-only' : 'Could not paste here')
+        );
+      } else {
+        finishPaste(adapter, text, result);
+      }
+    } catch (_) {
+      toast(adapter.isReadOnly() ? 'This editor is read-only' : 'Could not paste here');
+    }
+  }
+
+  function onContextMenu(event) {
+    const adapter = resolveAdapter(event);
+    if (!adapter) return;
+
+    // The page suppresses right-click with a capture listener that calls
+    // preventDefault(). Stop the event before that listener runs, and let the
+    // browser open its own menu (Copy / Paste / Select All then work).
+    event.stopImmediatePropagation();
+  }
 })();
