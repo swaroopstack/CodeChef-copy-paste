@@ -505,6 +505,7 @@
       }
     };
   }
+
   // VS Code's web workbench (used by CodeChef's assessment lab) embeds Monaco
   // but does not expose window.monaco. It does expose the workbench instance
   // as window.workbench, and that instance holds the DI service collection.
@@ -1003,6 +1004,7 @@
       }
     };
   }
+
   // DOM fallback for workbench builds where the service collection cannot be
   // reached. It focuses the hidden textarea, uses Monaco's select-all
   // keybinding, and fires the restored copy / insertText commands. Its
@@ -1228,6 +1230,7 @@
       }
     };
   }
+
   // The live VS Code workbench exposes window.workbench as its embedder API
   // ({ commands, env, logger, window, workspace, shutdown }), not as a service
   // collection. The service-based adapter above therefore cannot find the
@@ -1435,6 +1438,7 @@
       }
     });
   }
+
   // CodeMirror 6 does not expose its view on the DOM in a stable, public way,
   // so we let the browser handle clipboard events natively for it.
   function cm6Adapter(container) {
@@ -1473,6 +1477,7 @@
       }
     };
   }
+
   function makeAdapter(container) {
     if (!isElement(container)) return null;
     if (container.classList.contains('ace_editor')) return aceAdapter(container);
@@ -1544,6 +1549,7 @@
     if (adapter) lastAdapter = adapter;
     return adapter;
   }
+
   /* ------------------------------------------------------------------ *
    * Clipboard helpers
    * ------------------------------------------------------------------ */
@@ -1667,6 +1673,7 @@
       error: data.error
     });
   });
+
   /* ------------------------------------------------------------------ *
    * Copy / cut / paste
    * ------------------------------------------------------------------ */
@@ -2146,5 +2153,304 @@
     // preventDefault(). Stop the event before that listener runs, and let the
     // browser open its own menu (Copy / Paste / Select All then work).
     event.stopImmediatePropagation();
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Floating toolbar
+   * ------------------------------------------------------------------ */
+
+  function toast(message, ms) {
+    if (!ui) return;
+    ui.toast.textContent = message;
+    ui.toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      if (ui) ui.toast.classList.remove('show');
+    }, typeof ms === 'number' ? ms : 1700);
+  }
+
+  function restorePosition(host) {
+    let position = null;
+    try {
+      position = JSON.parse(localStorage.getItem(POS_KEY) || 'null');
+    } catch (_) {
+      position = null;
+    }
+    if (!position || typeof position.left !== 'number' || typeof position.top !== 'number') {
+      return;
+    }
+
+    const width = host.offsetWidth || 190;
+    const height = host.offsetHeight || 34;
+    const left = Math.min(Math.max(4, position.left), window.innerWidth - width - 4);
+    const top = Math.min(Math.max(4, position.top), window.innerHeight - height - 4);
+    host.style.left = left + 'px';
+    host.style.top = top + 'px';
+    host.style.right = 'auto';
+    host.style.bottom = 'auto';
+  }
+
+  function savePosition(left, top) {
+    try {
+      localStorage.setItem(POS_KEY, JSON.stringify({ left, top }));
+    } catch (_) {
+      /* ignore */
+    }
+  }
+
+  function makeDraggable(host, handle) {
+    let drag = null;
+
+    add(handle, 'pointerdown', (event) => {
+      if (event.button !== 0) return;
+      const rect = host.getBoundingClientRect();
+      drag = {
+        pointerId: event.pointerId,
+        offsetX: event.clientX - rect.left,
+        offsetY: event.clientY - rect.top
+      };
+      try {
+        handle.setPointerCapture(event.pointerId);
+      } catch (_) {
+        /* ignore */
+      }
+      event.preventDefault();
+    });
+
+    add(handle, 'pointermove', (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const width = host.offsetWidth || 190;
+      const height = host.offsetHeight || 34;
+      const left = Math.min(Math.max(4, event.clientX - drag.offsetX), window.innerWidth - width - 4);
+      const top = Math.min(Math.max(4, event.clientY - drag.offsetY), window.innerHeight - height - 4);
+      host.style.left = left + 'px';
+      host.style.top = top + 'px';
+      host.style.right = 'auto';
+      host.style.bottom = 'auto';
+    });
+
+    const endDrag = (event) => {
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      const rect = host.getBoundingClientRect();
+      savePosition(rect.left, rect.top);
+      drag = null;
+    };
+
+    add(handle, 'pointerup', endDrag);
+    add(handle, 'pointercancel', endDrag);
+  }
+
+  const UI_STYLE = `
+    :host { all: initial; }
+    .bar {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      padding: 3px;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 999px;
+      background: rgba(17, 24, 39, 0.94);
+      color: #e5e7eb;
+      font: 12px/1.2 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+      backdrop-filter: blur(8px);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .grip {
+      width: 16px;
+      align-self: stretch;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #6b7280;
+      cursor: grab;
+      font-size: 11px;
+      letter-spacing: -2px;
+      touch-action: none;
+    }
+    .grip:active { cursor: grabbing; }
+    button {
+      appearance: none;
+      border: 0;
+      margin: 0;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: transparent;
+      color: inherit;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    button:hover { background: rgba(255, 255, 255, 0.1); }
+    button:active { background: rgba(255, 255, 255, 0.16); }
+    button:focus-visible { outline: 2px solid #4ade80; outline-offset: 1px; }
+    button:disabled { opacity: 0.4; cursor: default; }
+    button.primary { color: #86efac; }
+    button.version {
+      padding: 4px 6px;
+      font-size: 10px;
+      font-weight: 500;
+      opacity: 0.55;
+      letter-spacing: 0.02em;
+    }
+    button.version:hover { opacity: 1; }
+    svg { width: 14px; height: 14px; flex: none; }
+    .toast {
+      position: fixed;
+      left: 50%;
+      bottom: 26px;
+      transform: translate(-50%, 12px);
+      padding: 7px 12px;
+      border-radius: 8px;
+      background: rgba(17, 24, 39, 0.96);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      color: #f3f4f6;
+      font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 140ms ease, transform 140ms ease;
+      max-width: min(92vw, 720px);
+      text-align: center;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
+    .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  `;
+
+  const COPY_ICON =
+    '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+    '<rect x="5.25" y="5.25" width="8" height="8" rx="1.6" stroke="currentColor" stroke-width="1.4"/>' +
+    '<path d="M10.75 3.25v-.6a1.4 1.4 0 0 0-1.4-1.4H3.65a1.4 1.4 0 0 0-1.4 1.4v6.7a1.4 1.4 0 0 0 1.4 1.4h.6" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+    '</svg>';
+
+  const PASTE_ICON =
+    '<svg viewBox="0 0 16 16" fill="none" aria-hidden="true">' +
+    '<path d="M6 3.25H4.6A1.6 1.6 0 0 0 3 4.85v8.1a1.6 1.6 0 0 0 1.6 1.6h6.8a1.6 1.6 0 0 0 1.6-1.6v-8.1a1.6 1.6 0 0 0-1.6-1.6H10" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>' +
+    '<rect x="6" y="2" width="4" height="2.8" rx="1" stroke="currentColor" stroke-width="1.4"/>' +
+    '</svg>';
+
+  function createUi() {
+    if (ui || !document.body) return;
+
+    const host = document.createElement('div');
+    host.id = UI_ID;
+    host.title = 'CodeChef Clipboard Unlocker v' + VERSION;
+    host.dataset.version = VERSION;
+    host.style.cssText =
+      'position:fixed;right:18px;bottom:18px;z-index:2147483647;display:none;';
+
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML =
+      '<style>' + UI_STYLE + '</style>' +
+      '<div class="bar" role="toolbar" aria-label="CodeChef clipboard tools">' +
+      '<span class="grip" title="Drag to move" aria-hidden="true">\u283f</span>' +
+      '<button type="button" class="primary" data-action="copy" title="Copy selection, or the whole file (Alt+Shift+C)">' +
+      COPY_ICON + '<span>Copy</span></button>' +
+      '<button type="button" data-action="paste" title="Paste at the cursor (Alt+Shift+V)">' +
+      PASTE_ICON + '<span>Paste</span></button>' +
+      '<button type="button" class="version" data-action="diag" title="Show diagnostics (Ctrl+Alt+D)">v' +
+      VERSION +
+      '</button>' +
+      '</div>' +
+      '<div class="toast" role="status" aria-live="polite"></div>';
+
+    const copyButton = shadow.querySelector('[data-action="copy"]');
+    const pasteButton = shadow.querySelector('[data-action="paste"]');
+    const versionButton = shadow.querySelector('[data-action="diag"]');
+    const toastElement = shadow.querySelector('.toast');
+    const grip = shadow.querySelector('.grip');
+
+    add(copyButton, 'click', () => {
+      copySmart(lastAdapter || findVisibleAdapter());
+    });
+
+    add(pasteButton, 'click', () => {
+      pasteFromClipboard(lastAdapter || findVisibleAdapter());
+    });
+
+    add(versionButton, 'click', () => {
+      showDiagnostic();
+    });
+
+    makeDraggable(host, grip);
+    document.body.appendChild(host);
+
+    ui = { host, shadow, copyButton, pasteButton, versionButton, toast: toastElement };
+
+    // Wait for layout, then restore a previously dragged position.
+    requestAnimationFrame(() => {
+      if (ui) restorePosition(host);
+    });
+  }
+
+  function refreshUi() {
+    // Some SPAs replace the body; recreate the bar if ours was removed.
+    if (ui && ui.host && !ui.host.isConnected) ui = null;
+    if (!document.body) return;
+    createUi();
+    if (!ui) return;
+
+    const adapter = findVisibleAdapter();
+    if (!adapter) {
+      ui.host.style.display = 'none';
+      return;
+    }
+
+    ui.host.style.display = 'block';
+    ui.pasteButton.disabled = adapter.isReadOnly();
+
+    if (!ui.host.dataset.positioned) {
+      ui.host.dataset.positioned = '1';
+      restorePosition(ui.host);
+    }
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Boot
+   * ------------------------------------------------------------------ */
+
+  add(window, 'keydown', onKeyDown, true);
+  add(window, 'copy', onCopy, true);
+  add(window, 'cut', onCut, true);
+  add(window, 'paste', onPaste, true);
+  add(window, 'contextmenu', onContextMenu, true);
+
+  add(document, 'mousedown', (event) => {
+    remember(event);
+  }, true);
+
+  add(document, 'focusin', (event) => {
+    remember(event);
+  }, true);
+
+  add(window, 'resize', () => {
+    if (!ui || ui.host.style.display === 'none') return;
+    const rect = ui.host.getBoundingClientRect();
+    ui.host.style.left = Math.min(rect.left, window.innerWidth - rect.width - 4) + 'px';
+    ui.host.style.top = Math.min(rect.top, window.innerHeight - rect.height - 4) + 'px';
+    ui.host.style.right = 'auto';
+    ui.host.style.bottom = 'auto';
+  }, { passive: true });
+
+  function start() {
+    repairLockdown();
+    clearInterval(repairTimer);
+    repairTimer = setInterval(watchLockdown, 50);
+
+    refreshUi();
+    clearInterval(refreshTimer);
+    refreshTimer = setInterval(refreshUi, 1000);
+  }
+
+  if (document.readyState === 'loading') {
+    add(document, 'DOMContentLoaded', start);
+  } else {
+    start();
   }
 })();
