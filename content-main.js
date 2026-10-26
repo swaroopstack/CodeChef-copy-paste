@@ -1228,6 +1228,213 @@
       }
     };
   }
+  // The live VS Code workbench exposes window.workbench as its embedder API
+  // ({ commands, env, logger, window, workspace, shutdown }), not as a service
+  // collection. The service-based adapter above therefore cannot find the
+  // editor there. The embedder API does expose commands.executeCommand, and
+  // the workbench registers a low-level "paste" command that triggers Monaco's
+  // paste edit path with the text we pass. For a single cursor that path is a
+  // plain range replace, so it preserves the copied block exactly. This adapter
+  // is the reliable fallback when the DI service collection is not exposed.
+  function workbenchCommandAdapter(container) {
+    const workbench = window.workbench;
+    const commands = workbench && workbench.commands;
+    if (!commands || typeof commands.executeCommand !== 'function') return null;
+
+    // Reuse the DOM adapter for focus, cut, select-all, and read-only
+    // detection. Copy and paste are replaced with the workbench command paths.
+    const dom = monacoDomAdapter(container);
+    if (!dom) return null;
+
+    const command = (id, args) => {
+      try {
+        return Promise.resolve(commands.executeCommand(id, args));
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    };
+
+    const tryCommand = (id, args) => command(id, args).then(() => true, () => false);
+    const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    const countFolds = () => {
+      try {
+        return container.querySelectorAll('.inline-folded').length;
+      } catch (_) {
+        return 0;
+      }
+    };
+
+    const hasFolds = () => countFolds() > 0;
+
+    // Folded regions are the one case where a DOM fallback can leak a `…`
+    // placeholder. Unfold before the final select-all so even a fallback copy
+    // sees the hidden lines. The editor actions are tried under both IDs used
+    // by different workbench builds; failure is harmless and the copy still
+    // proceeds from the model selection.
+    const unfoldAll = () => {
+      lastUnfoldPath = '';
+      const before = countFolds();
+      if (!before) {
+        lastUnfoldPath = 'none';
+        return Promise.resolve(false);
+      }
+
+      // A command can resolve even when that build does not register it, so
+      // verify against the DOM fold placeholder count instead of trusting the
+      // promise. This also tells the diagnostic whether unfolding really
+      // happened.
+      const verify = (id) =>
+        tryCommand(id).then((ok) => {
+          if (!ok) return false;
+          return wait(30).then(() => {
+            if (countFolds() === 0) {
+              lastUnfoldPath = id;
+              return true;
+            }
+            return false;
+          });
+        });
+
+      return verify('editor.action.unfoldAll').then((ok) => {
+        if (ok) return true;
+        return verify('editor.unfoldAll').then((ok2) => {
+          if (ok2) return true;
+          lastUnfoldPath = 'failed';
+          return false;
+        });
+      });
+    };
+
+    // The workbench's own copy action writes the editor model selection to the
+    // clipboard. It does not read the DOM selection, so folded lines are
+    // included and no fold placeholder can leak into the copied text.
+    // editor.action.selectAll also focuses the active code editor and selects
+    // the whole model, which restores text focus after a toolbar click.
+    const commandCopyAll = () => {
+      lastCopyPath = 'workbench-command';
+      lastCopyFolds = countFolds();
+      lastUnfoldPath = '';
+      const folded = lastCopyFolds > 0;
+      const prepare = folded
+        ? command('editor.action.selectAll')
+            .then(() => unfoldAll())
+            .then(() => command('editor.action.selectAll'))
+        : command('editor.action.selectAll');
+      return prepare.then(
+        () =>
+          command('editor.action.clipboardCopyAction').then(
+            () => 'whole',
+            () => {
+              // The select-all command focused the real code editor, but the
+              // copy action failed. Fire the restored native copy command
+              // without re-focusing a guessed textarea: the model selection is
+              // already in place, and the real editor still has text focus.
+              lastCopyPath = 'native-fallback';
+              try {
+                return nativeExec && nativeExec.call(document, 'copy') ? 'whole' : '';
+              } catch (_) {
+                return '';
+              }
+            }
+          ),
+        () => {
+          // A minimal embedder may not register the editor commands. Keep the
+          // old path as an explicit, visible fallback rather than silently
+          // copying a partial DOM selection.
+          const result = dom.copyAll();
+          lastCopyPath = 'dom-fallback';
+          return result;
+        }
+      );
+    };
+
+    const commandCopy = () => {
+      lastCopyPath = 'workbench-command';
+      if (!dom.hasSelection()) return commandCopyAll();
+      lastCopyFolds = countFolds();
+      lastUnfoldPath = '';
+      try {
+        dom.focus();
+      } catch (_) {
+        /* ignore */
+      }
+      const prepare = lastCopyFolds > 0 ? unfoldAll() : Promise.resolve();
+      return prepare.then(() =>
+        command('editor.action.clipboardCopyAction').then(
+          () => 'selection',
+          () => {
+            // The editor is focused and its model selection is intact. Use the
+            // restored native copy command directly instead of the DOM
+            // fallback, which could select all or copy a stale DOM selection.
+            lastCopyPath = 'native-fallback';
+            try {
+              return nativeExec && nativeExec.call(document, 'copy') ? 'selection' : '';
+            } catch (_) {
+              return '';
+            }
+          }
+        )
+      );
+    };
+
+    const commandPaste = (text) => {
+      if (!text) return Promise.resolve('');
+      if (dom.isReadOnly()) return Promise.resolve('');
+      // The workbench paste command acts on the focused code editor. The
+      // toolbar button may have taken focus, so put it back on the real
+      // Monaco textarea first. If focus cannot be restored, do not report a
+      // successful paste that never happened.
+      let target = null;
+      try {
+        target = dom.focus();
+      } catch (_) {
+        target = null;
+      }
+      if (!target || document.activeElement !== target) return Promise.resolve('');
+
+      const run = () => {
+        let result;
+        try {
+          result = commands.executeCommand('paste', {
+            text,
+            pasteOnNewLine: false,
+            multicursorText: null,
+            mode: null
+          });
+        } catch (_) {
+          return Promise.resolve('');
+        }
+        return Promise.resolve(result).then(
+          () => 'workbench-command',
+          () => ''
+        );
+      };
+
+      // Let the focus event reach the workbench's focus tracker before the
+      // command looks up getFocusedCodeEditor().
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          run().then(resolve, () => resolve(''));
+        }, 0);
+      });
+    };
+
+    return Object.assign({}, dom, {
+      kind: 'monaco-workbench-command',
+      manual: true,
+      // The command copy paths focus the real code editor themselves. A
+      // second focus call from copyAll/copySmart could move focus back to a
+      // guessed textarea before the asynchronous copy action runs.
+      copyKeepsFocus: true,
+      copy: commandCopy,
+      copyAll: commandCopyAll,
+      paste: commandPaste,
+      insert(text) {
+        return commandPaste(text);
+      }
+    });
+  }
   // CodeMirror 6 does not expose its view on the DOM in a stable, public way,
   // so we let the browser handle clipboard events natively for it.
   function cm6Adapter(container) {
