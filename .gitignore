@@ -1,0 +1,6 @@
+test/.build/
+test/.profile/
+node_modules/
+test/node_modules/
+test/package.json
+test/package-lock.json
