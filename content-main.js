@@ -391,4 +391,79 @@
     };
   }
 
+  function cm5Adapter(container) {
+    const cm = container.CodeMirror;
+    if (!cm || typeof cm.getValue !== 'function') return null;
+
+    return {
+      kind: 'codemirror5',
+      container,
+      manual: true,
+      getValue() {
+        return cm.getValue();
+      },
+      getSelectedText() {
+        return cm.getSelection() || '';
+      },
+      focus() {
+        cm.focus();
+      },
+      selectAll() {
+        cm.focus();
+        cm.execCommand('selectAll');
+      },
+      isReadOnly() {
+        return !!cm.getOption('readOnly');
+      },
+      insert(text) {
+        if (this.isReadOnly()) throw new Error('read-only');
+        cm.focus();
+        cm.replaceSelection(text, 'end');
+        return 'codemirror5';
+      },
+      deleteSelection() {
+        if (this.isReadOnly()) return;
+        cm.replaceSelection('');
+      }
+    };
+  }
+
+  // CodeMirror 6 does not expose its view on the DOM in a stable, public way,
+  // so we let the browser handle clipboard events natively for it.
+  function cm6Adapter(container) {
+    const content = container.querySelector('.cm-content');
+    if (!content) return null;
+
+    return {
+      kind: 'codemirror6',
+      container,
+      manual: false,
+      getValue() {
+        const lines = container.querySelectorAll('.cm-line');
+        return Array.from(lines, (line) => line.textContent || '').join('\n');
+      },
+      getSelectedText() {
+        const selection = window.getSelection();
+        if (!selection || !selection.rangeCount) return '';
+        const anchor = selection.anchorNode;
+        return anchor && container.contains(anchor) ? selection.toString() : '';
+      },
+      focus() {
+        content.focus();
+      },
+      selectAll() {
+        content.focus();
+        document.execCommand('selectAll');
+      },
+      isReadOnly() {
+        return content.getAttribute('contenteditable') === 'false';
+      },
+      insert() {
+        throw new Error('unsupported');
+      },
+      deleteSelection() {
+        throw new Error('unsupported');
+      }
+    };
+  }
 })();
