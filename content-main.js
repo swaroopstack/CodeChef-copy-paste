@@ -1473,4 +1473,198 @@
       }
     };
   }
+  function makeAdapter(container) {
+    if (!isElement(container)) return null;
+    if (container.classList.contains('ace_editor')) return aceAdapter(container);
+    if (container.classList.contains('CodeMirror')) return cm5Adapter(container);
+    if (container.classList.contains('monaco-editor')) {
+      return (
+        workbenchAdapter(container) ||
+        workbenchCommandAdapter(container) ||
+        monacoAdapter(container) ||
+        monacoDomAdapter(container)
+      );
+    }
+    if (container.classList.contains('cm-editor')) return cm6Adapter(container);
+    return null;
+  }
+
+  function containerFor(target) {
+    if (!isElement(target)) return null;
+    return target.closest(EDITOR_SELECTOR);
+  }
+
+  function adapterForEvent(event) {
+    const container = containerFor(event.target);
+    if (container) return makeAdapter(container);
+
+    // Some browsers target document/body for clipboard events. Fall back to
+    // the focused element when it lives inside an editor.
+    const active = document.activeElement;
+    if (isElement(active)) {
+      const activeContainer = containerFor(active);
+      if (activeContainer) return makeAdapter(activeContainer);
+    }
+    return null;
+  }
+
+  function isUiFocused() {
+    return !!(ui && ui.host && document.activeElement === ui.host);
+  }
+
+  function resolveAdapter(event) {
+    const direct = adapterForEvent(event);
+    if (direct) return direct;
+    if (isUiFocused() && lastAdapter && lastAdapter.container.isConnected) return lastAdapter;
+    return null;
+  }
+
+  function findVisibleAdapter() {
+    const containers = document.querySelectorAll(EDITOR_SELECTOR);
+
+    // Prefer the editor that currently has focus.
+    const active = document.activeElement;
+    for (const container of containers) {
+      if (isElement(active) && container.contains(active)) {
+        const adapter = makeAdapter(container);
+        if (adapter) return adapter;
+      }
+    }
+
+    for (const container of containers) {
+      if (!isVisible(container)) continue;
+      const adapter = makeAdapter(container);
+      if (adapter) return adapter;
+    }
+    return null;
+  }
+
+  function remember(event) {
+    const adapter = adapterForEvent(event);
+    if (adapter) lastAdapter = adapter;
+    return adapter;
+  }
+  /* ------------------------------------------------------------------ *
+   * Clipboard helpers
+   * ------------------------------------------------------------------ */
+
+  function textLength(text) {
+    return text.length === 1 ? '1 character' : text.length.toLocaleString() + ' characters';
+  }
+
+  function selectedText(adapter) {
+    try {
+      return adapter.getSelectedText() || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function editorValue(adapter) {
+    try {
+      return adapter.getValue() || '';
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function chooseAdapter(preferred) {
+    // Recreate the adapter for the container instead of reusing a captured
+    // one. The workbench service collection appears after the editor mounts,
+    // so an adapter captured a moment earlier may still be the DOM fallback.
+    // Recreating lets the exact executeEdits path take over as soon as it is
+    // available.
+    if (preferred && preferred.container && preferred.container.isConnected) {
+      const fresh = makeAdapter(preferred.container);
+      return fresh || preferred;
+    }
+    if (lastAdapter && lastAdapter.container.isConnected) {
+      const fresh = makeAdapter(lastAdapter.container);
+      return fresh || lastAdapter;
+    }
+    return findVisibleAdapter();
+  }
+
+  // Synchronous clipboard write used by buttons/shortcuts. document.execCommand
+  // is saved before CodeChef replaces it, so the page's stub cannot interfere.
+  function copyTextNative(text) {
+    if (!nativeExec || !document.body) return false;
+
+    const previousFocus = document.activeElement;
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.setAttribute('aria-hidden', 'true');
+    textarea.style.cssText =
+      'position:fixed;top:-10000px;left:-10000px;width:1px;height:1px;' +
+      'opacity:0;pointer-events:none;font-size:12px;';
+
+    document.body.appendChild(textarea);
+    let ok = false;
+    try {
+      textarea.focus({ preventScroll: true });
+      textarea.select();
+      textarea.setSelectionRange(0, text.length);
+      ok = nativeExec.call(document, 'copy');
+    } catch (_) {
+      ok = false;
+    } finally {
+      textarea.remove();
+      if (previousFocus && typeof previousFocus.focus === 'function') {
+        try {
+          previousFocus.focus({ preventScroll: true });
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+    return ok;
+  }
+
+  function copyThroughBridge(text) {
+    return requestBridge('write', text).then((reply) => !!reply.ok);
+  }
+
+  function bridgeWrite(text) {
+    if (copyTextNative(text)) return Promise.resolve(true);
+    return copyThroughBridge(text);
+  }
+
+  function requestBridge(action, text) {
+    return new Promise((resolve) => {
+      if (!document.body) {
+        resolve({ ok: false, error: 'no-body' });
+        return;
+      }
+      const id = ++bridgeSeq;
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        resolve({ ok: false, error: 'timeout' });
+      }, 2500);
+
+      pending.set(id, { resolve, timer });
+      try {
+        window.postMessage({ __ccClip: 'request', id, action, text }, '*');
+      } catch (_) {
+        pending.delete(id);
+        clearTimeout(timer);
+        resolve({ ok: false, error: 'post-failed' });
+      }
+    });
+  }
+
+  add(window, 'message', (event) => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.__ccClip !== 'reply' || typeof data.id !== 'number') return;
+    const request = pending.get(data.id);
+    if (!request) return;
+    pending.delete(data.id);
+    clearTimeout(request.timer);
+    request.resolve({
+      ok: !!data.ok,
+      text: typeof data.text === 'string' ? data.text : '',
+      error: data.error
+    });
+  });
 })();
