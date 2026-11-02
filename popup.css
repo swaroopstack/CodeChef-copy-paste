@@ -1,0 +1,84 @@
+:root {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  width: 320px;
+  min-height: 214px;
+  margin: 0;
+  background: linear-gradient(180deg, #0d1117 0%, #0b0f14 100%);
+  color: #e6edf3;
+  font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.popup {
+  padding: 24px 22px 18px;
+  text-align: center;
+  border-top: 3px solid #238636;
+}
+
+.icon {
+  display: block;
+  width: 56px;
+  height: 56px;
+  margin: 0 auto 12px;
+  border-radius: 12px;
+}
+
+h1 {
+  margin: 0 0 6px;
+  font-size: 18px;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+}
+
+p {
+  margin: 0;
+  color: #8b949e;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.star {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 16px 0 14px;
+  padding: 10px 18px;
+  border-radius: 8px;
+  background: #238636;
+  color: #ffffff;
+  font-size: 14px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 120ms ease, transform 120ms ease;
+}
+
+.star:hover {
+  background: #2ea043;
+}
+
+.star:active {
+  transform: translateY(1px);
+}
+
+.star:focus-visible {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
+}
+
+.star-icon {
+  font-size: 16px;
+  line-height: 1;
+}
+
+.version {
+  color: #6e7681;
+  font-size: 11px;
+}

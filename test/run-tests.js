@@ -58,7 +58,7 @@ function prepareBuild() {
   fs.rmSync(BUILD_DIR, { recursive: true, force: true });
   fs.mkdirSync(path.join(BUILD_DIR, 'icons'), { recursive: true });
 
-  for (const file of ['content-main.js', 'content-isolated.js']) {
+  for (const file of ['content-main.js', 'content-isolated.js', 'popup.html', 'popup.css']) {
     fs.copyFileSync(path.join(ROOT, file), path.join(BUILD_DIR, file));
   }
   for (const size of [16, 32, 48, 128]) {
@@ -185,7 +185,25 @@ async function assertClipboard(page, blank, expected, label) {
   console.log(`ok - ${label}`);
 }
 
+function assertPopup() {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  assert.strictEqual(
+    manifest.action && manifest.action.default_popup,
+    'popup.html',
+    'the toolbar action should open popup.html'
+  );
+
+  const popup = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  assert.ok(/Thank you for using it/i.test(popup), 'popup should thank the user');
+  assert.ok(
+    popup.includes('https://github.com/swaroopstack/CodeChef-copy-paste'),
+    'popup should link to the GitHub repository'
+  );
+  console.log('ok - popup opens from the toolbar and links to GitHub');
+}
+
 async function main() {
+  assertPopup();
   prepareBuild();
   fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
 
@@ -620,7 +638,7 @@ async function main() {
     await altShiftKey(lab, 'd');
     await sleep(150);
     const diagnostic = await toastText(lab);
-    assert.ok(diagnostic.includes('v1.1.8'), 'diagnostic should report version 1.1.8: ' + diagnostic);
+    assert.ok(diagnostic.includes('v1.1.9'), 'diagnostic should report version 1.1.9: ' + diagnostic);
     assert.ok(diagnostic.includes('monaco-dom'), 'diagnostic should report the adapter: ' + diagnostic);
     assert.ok(
       /paste: (paste|native)/.test(diagnostic),

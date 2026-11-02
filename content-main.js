@@ -34,7 +34,7 @@
     }
   }
 
-  const VERSION = '1.1.8';
+  const VERSION = '1.1.9';
   const EDITOR_SELECTOR = '.ace_editor, .CodeMirror, .cm-editor, .monaco-editor';
   const UI_ID = 'codechef-clipboard-unlocker';
   const POS_KEY = 'cc-clipboard-ui-pos';
